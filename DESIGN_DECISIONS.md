@@ -201,6 +201,11 @@ contract pair was deployed live on Studio and the following was confirmed:
 Design finalized, three contracts written, deployed live, and verified
 end-to-end (first-instance verdict → precedent record → appeal → verdict
 overturned → bond correctly refunded to the original claimant → final
-verdict recorded again in PrecedentRegistry). See `LESSONS_LEARNED.md` for
-the complete list of live-verified GenVM behaviors, including a
-previously-undocumented constraint on file header comment length.
+verdict recorded again in PrecedentRegistry). A portal steward review
+flagged that the cross-contract write entry points lacked caller
+authorization; each contract now restricts its sensitive write methods to
+the specific configured court contract(s), and `request_appeal` is
+restricted to the case's own recorded claimant. See `LESSONS_LEARNED.md`
+for the complete list of live-verified GenVM behaviors, including a
+previously-undocumented constraint on file header comment length and the
+access-control fix.

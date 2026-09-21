@@ -22,9 +22,20 @@ constraint) are recorded in [`LESSONS_LEARNED.md`](./LESSONS_LEARNED.md).
 
 | Contract | Address |
 |---|---|
-| PrecedentRegistry | `0x4A84CEA53f5f635c571edfE7e9ad637e24eB244A` |
-| FirstInstanceCourt | `0x636c1Bf978BCdF1a6fc0b8ACeeC9AbB3E297e3D2` |
-| AppealsCourt | `0x329340e855C37Dc91A734DA5bda070984F563A9C` |
+| PrecedentRegistry | `0x35fc91c3D7e80Dd1d4D113eB4D5A03902cBaaa39` |
+| FirstInstanceCourt | `0x464534F7BC295126e3C64e8052CF4cBAaF9e5764` |
+| AppealsCourt | `0xB34cE011A103D471422f05C3aed8b77C406F5d5E` |
+
+## Access control
+
+Each contract enforces the caller relationships implied by the design:
+
+- `PrecedentRegistry.record_verdict` only accepts calls from the
+  configured `FirstInstanceCourt` or `AppealsCourt` addresses.
+- `AppealsCourt.file_appeal` only accepts calls from the configured
+  `FirstInstanceCourt` address.
+- `FirstInstanceCourt.request_appeal` only accepts calls from the case's
+  recorded claimant, and only once per case.
 
 ## Repository structure
 
@@ -50,7 +61,8 @@ pytest tests/ -v
 ## Deployment
 
 Use GenLayer Studio (`studio.genlayer.com`). Deployment order matters
-because the contracts need each other's addresses:
+because the contracts need each other's addresses, and each court must be
+explicitly authorized on the contracts it calls into:
 
 1. `precedent_registry.py` (no arguments)
 2. `first_instance_court.py` with `precedent_registry_address`,
@@ -58,6 +70,16 @@ because the contracts need each other's addresses:
 3. `appeals_court.py` with `precedent_registry_address`
 4. On `FirstInstanceCourt`, call `set_appeals_court` with the
    `AppealsCourt` address
+5. On `AppealsCourt`, call `set_first_instance_court` with the
+   `FirstInstanceCourt` address
+6. On `PrecedentRegistry`, call `set_first_instance_court` with the
+   `FirstInstanceCourt` address
+7. On `PrecedentRegistry`, call `set_appeals_court` with the
+   `AppealsCourt` address
+
+Only after all 7 steps are complete will `record_verdict` and
+`file_appeal` accept calls (they reject any caller that isn't the
+configured court contract).
 
 **Important:** keep each `.py` file's header to at most 2 lines of comment
 (`# v0.1.0` + `Depends`) — longer comment blocks cause schema-loading to

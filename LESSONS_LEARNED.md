@@ -106,14 +106,41 @@ Ethereum) — i.e. "10 GEN" is stored/read as `10000000000000000000`, not
 - Raw `int` is not supported for persistent fields — must use `u256`/
   `i32`/`bigint`.
 
-## 9. Final deployed addresses for Tribunal (Studio, Sep 16 2026)
+## 9. Final deployed addresses for Tribunal (Studio, Sep 21 2026 — v1.1, with access control)
 
-- `PrecedentRegistry`: `0x4A84CEA53f5f635c571edfE7e9ad637e24eB244A`
-- `FirstInstanceCourt`: `0x636c1Bf978BCdF1a6fc0b8ACeeC9AbB3E297e3D2`
-- `AppealsCourt`: `0x329340e855C37Dc91A734DA5bda070984F563A9C`
+- `PrecedentRegistry`: `0x35fc91c3D7e80Dd1d4D113eB4D5A03902cBaaa39`
+- `FirstInstanceCourt`: `0x464534F7BC295126e3C64e8052CF4cBAaF9e5764`
+- `AppealsCourt`: `0xB34cE011A103D471422f05C3aed8b77C406F5d5E`
 
 Live end-to-end test confirmed: `file_case` (low tier, strict_eq) →
-async `.emit()` to `PrecedentRegistry` → `request_appeal` →
-`AppealsCourt` (three framings via `prompt_comparative`) → verdict
-overturned → bond correctly refunded to the real claimant → final verdict
-recorded again in `PrecedentRegistry`.
+async `.emit()` to `PrecedentRegistry` → `request_appeal` (only callable
+by the case's own claimant) → `AppealsCourt` (only callable by the
+configured `FirstInstanceCourt`; three framings via `prompt_comparative`)
+→ verdict overturned → bond correctly refunded to the real claimant →
+final verdict recorded again in `PrecedentRegistry` (only callable by the
+configured court contracts) — `get_entry_count` confirmed 2 entries.
+
+## 10. Access-control gap found by portal review (fixed)
+
+A steward reviewing the first submission flagged a real gap: none of the
+cross-contract write entry points checked *who* was calling them.
+Concretely:
+
+- `PrecedentRegistry.record_verdict` accepted a verdict from **any**
+  caller, not just the two configured court contracts.
+- `AppealsCourt.file_appeal` accepted an appeal from **any** caller, not
+  just the configured `FirstInstanceCourt` — meaning anyone could forge a
+  fake `case_json` and trigger an appeal review directly.
+- `FirstInstanceCourt.request_appeal` let **any** address request an
+  appeal for **any** case_id, not just the case's own claimant.
+
+**Fix:** each contract now stores the address(es) it should trust
+(`first_instance_court`, `appeals_court` on `PrecedentRegistry`;
+`first_instance_court` on `AppealsCourt`), settable exactly once by the
+deployer via a dedicated `set_*` method, and the sensitive write methods
+now `raise gl.vm.UserError(...)` if `gl.message.sender_address` doesn't
+match. `request_appeal` additionally checks the caller against the
+case's own recorded `claimant` field. This added a new circular
+bootstrapping step to deployment (see the updated 7-step order in
+`README.md`) since `PrecedentRegistry` is deployed before the two courts
+that need to be registered on it.
