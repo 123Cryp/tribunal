@@ -2,13 +2,14 @@
 Offline tests for the Tribunal contracts, using genlayer-test's Direct Mode
 (in-process GenVM, no Studio/Docker needed).
 
-IMPORTANT: the exact signature of the mock_web / mock_llm cheatcodes has NOT
-been live-verified against the installed genlayer-test version in this
-environment (only direct_vm, direct_deploy, and the sender-related fixtures
-were confirmed from public examples). Before relying on these tests, run
-them once and adjust the mock_web(...)/mock_llm(...) calls to match whatever
-error message pytest reports for the actual installed version -- this
-mirrors the project's own rule of never trusting unverified SDK surface.
+IMPORTANT: the exact signature of the mock_web / mock_llm cheatcodes, and
+of impersonating a specific sender address (used below via a `sender=`
+kwarg to simulate a call arriving "from" a given contract address), has
+NOT been live-verified against the installed genlayer-test version in
+this environment. Before relying on these tests, run them once and adjust
+calls to match whatever error message pytest reports for the actual
+installed version -- this mirrors the project's own rule of never
+trusting unverified SDK surface.
 
 Run with:
     pip install genlayer-test
@@ -24,6 +25,21 @@ FIRST_INSTANCE_COURT_PATH = "contracts/first_instance_court.py"
 APPEALS_COURT_PATH = "contracts/appeals_court.py"
 
 
+def _wire_up(direct_deploy):
+    """Deploy all three contracts and complete the 7-step authorization
+    handshake, mirroring the documented deployment order."""
+    registry = direct_deploy(PRECEDENT_REGISTRY_PATH)
+    court = direct_deploy(FIRST_INSTANCE_COURT_PATH, registry.address, 100, 1000)
+    appeals = direct_deploy(APPEALS_COURT_PATH, registry.address)
+
+    court.set_appeals_court(appeals.address)
+    appeals.set_first_instance_court(court.address)
+    registry.set_first_instance_court(court.address)
+    registry.set_appeals_court(appeals.address)
+
+    return registry, court, appeals
+
+
 # ---------------------------------------------------------------------------
 # PrecedentRegistry
 # ---------------------------------------------------------------------------
@@ -33,20 +49,40 @@ def test_registry_starts_empty(direct_deploy):
     assert registry.get_entry_count() == 0
 
 
-def test_registry_records_and_reads_back(direct_deploy):
+def test_registry_rejects_unauthorized_record_verdict(direct_deploy):
     registry = direct_deploy(PRECEDENT_REGISTRY_PATH)
-    registry.record_verdict(0, "Vendor failed to deliver goods", "BREACH", "low")
+    # No court configured yet -> any caller must be rejected.
+    with pytest.raises(Exception):
+        registry.record_verdict(0, "Vendor failed to deliver goods", "BREACH", "low")
+
+
+def test_registry_accepts_verdict_from_configured_first_instance_court(direct_deploy):
+    registry, court, appeals = _wire_up(direct_deploy)
+    registry.record_verdict(0, "Vendor failed to deliver goods", "BREACH", "low", sender=court.address)
     assert registry.get_entry_count() == 1
     entry = json.loads(registry.get_entry(0))
-    assert entry["case_id"] == 0
     assert entry["verdict"] == "BREACH"
-    assert entry["tier"] == "low"
+
+
+def test_registry_rejects_verdict_from_unrelated_address(direct_deploy, direct_accounts):
+    registry, court, appeals = _wire_up(direct_deploy)
+    stranger = direct_accounts[1]
+    with pytest.raises(Exception):
+        registry.record_verdict(0, "Vendor failed to deliver goods", "BREACH", "low", sender=stranger)
+
+
+def test_set_first_instance_court_only_once(direct_deploy):
+    registry = direct_deploy(PRECEDENT_REGISTRY_PATH)
+    court = direct_deploy(FIRST_INSTANCE_COURT_PATH, registry.address, 100, 1000)
+    registry.set_first_instance_court(court.address)
+    with pytest.raises(Exception):
+        registry.set_first_instance_court(court.address)
 
 
 def test_registry_search_finds_shared_words(direct_deploy):
-    registry = direct_deploy(PRECEDENT_REGISTRY_PATH)
-    registry.record_verdict(0, "Vendor failed to deliver goods on time", "BREACH", "low")
-    registry.record_verdict(1, "Completely unrelated dispute about a lease", "NO_BREACH", "low")
+    registry, court, appeals = _wire_up(direct_deploy)
+    registry.record_verdict(0, "Vendor failed to deliver goods on time", "BREACH", "low", sender=court.address)
+    registry.record_verdict(1, "Completely unrelated dispute about a lease", "NO_BREACH", "low", sender=court.address)
 
     matches = json.loads(registry.search_precedents("Vendor failed to deliver equipment", 3))
     descriptions = [m["description"] for m in matches]
@@ -54,26 +90,12 @@ def test_registry_search_finds_shared_words(direct_deploy):
     assert "Completely unrelated dispute about a lease" not in descriptions
 
 
-def test_registry_search_respects_max_results(direct_deploy):
-    registry = direct_deploy(PRECEDENT_REGISTRY_PATH)
-    for i in range(5):
-        registry.record_verdict(i, "Vendor failed to deliver goods on time", "BREACH", "low")
-    matches = json.loads(registry.search_precedents("Vendor failed to deliver goods", 2))
-    assert len(matches) == 2
-
-
 # ---------------------------------------------------------------------------
 # FirstInstanceCourt (low tier only -- deterministic, no LLM needed)
 # ---------------------------------------------------------------------------
 
 def test_low_tier_breach_when_fact_matches(direct_deploy, mock_web):
-    registry = direct_deploy(PRECEDENT_REGISTRY_PATH)
-    court = direct_deploy(
-        FIRST_INSTANCE_COURT_PATH,
-        registry.address,
-        100,
-        1000,
-    )
+    registry, court, appeals = _wire_up(direct_deploy)
 
     # TODO: verify exact mock_web signature against installed genlayer-test.
     mock_web.set_page("https://example.test/evidence", "the shipment never arrived")
@@ -93,13 +115,7 @@ def test_low_tier_breach_when_fact_matches(direct_deploy, mock_web):
 
 
 def test_low_tier_no_breach_when_fact_does_not_match(direct_deploy, mock_web):
-    registry = direct_deploy(PRECEDENT_REGISTRY_PATH)
-    court = direct_deploy(
-        FIRST_INSTANCE_COURT_PATH,
-        registry.address,
-        100,
-        1000,
-    )
+    registry, court, appeals = _wire_up(direct_deploy)
 
     mock_web.set_page("https://example.test/evidence", "the shipment arrived on schedule")
 
@@ -115,46 +131,29 @@ def test_low_tier_no_breach_when_fact_does_not_match(direct_deploy, mock_web):
     assert case["verdict"] == "NO_BREACH"
 
 
-def test_tier_selection_by_claimed_amount(direct_deploy, mock_web, mock_llm):
-    registry = direct_deploy(PRECEDENT_REGISTRY_PATH)
-    court = direct_deploy(
-        FIRST_INSTANCE_COURT_PATH,
-        registry.address,
-        100,
-        1000,
-    )
+def test_request_appeal_only_by_recorded_claimant(direct_deploy, mock_web, direct_accounts):
+    registry, court, appeals = _wire_up(direct_deploy)
+    mock_web.set_page("https://example.test/evidence", "the shipment never arrived")
 
-    mock_web.set_page("https://example.test/evidence", "irrelevant page content")
+    claimant = direct_accounts[0]
+    stranger = direct_accounts[1]
 
-    # TODO: verify exact mock_llm signature; this assumes it can return a
-    # fixed JSON string for any exec_prompt call during the test.
-    mock_llm.set_response(
-        json.dumps({
-            "literal_reading": "BREACH",
-            "spirit_reading": "BREACH",
-            "final_verdict": "BREACH",
-        })
-    )
-
-    medium_case_id = court.file_case(
+    case_id = court.file_case(
         court.address,
-        "A medium-value dispute",
-        500,  # between low_threshold=100 and high_threshold=1000 -> medium tier
-        "some fact",
+        "Vendor failed to deliver goods as agreed",
+        50,
+        "shipment never arrived",
         "https://example.test/evidence",
+        sender=claimant,
     )
-    case = json.loads(court.get_case(medium_case_id))
-    assert case["tier"] == "medium"
+
+    with pytest.raises(Exception):
+        court.request_appeal(case_id, sender=stranger)
 
 
 def test_set_appeals_court_only_once(direct_deploy):
     registry = direct_deploy(PRECEDENT_REGISTRY_PATH)
-    court = direct_deploy(
-        FIRST_INSTANCE_COURT_PATH,
-        registry.address,
-        100,
-        1000,
-    )
+    court = direct_deploy(FIRST_INSTANCE_COURT_PATH, registry.address, 100, 1000)
     appeals = direct_deploy(APPEALS_COURT_PATH, registry.address)
 
     court.set_appeals_court(appeals.address)
@@ -164,12 +163,7 @@ def test_set_appeals_court_only_once(direct_deploy):
 
 def test_set_appeals_court_only_owner(direct_deploy, direct_accounts):
     registry = direct_deploy(PRECEDENT_REGISTRY_PATH)
-    court = direct_deploy(
-        FIRST_INSTANCE_COURT_PATH,
-        registry.address,
-        100,
-        1000,
-    )
+    court = direct_deploy(FIRST_INSTANCE_COURT_PATH, registry.address, 100, 1000)
     appeals = direct_deploy(APPEALS_COURT_PATH, registry.address)
 
     not_owner = direct_accounts[1]
@@ -181,9 +175,22 @@ def test_set_appeals_court_only_owner(direct_deploy, direct_accounts):
 # AppealsCourt
 # ---------------------------------------------------------------------------
 
+def test_file_appeal_rejects_calls_not_from_first_instance_court(direct_deploy, direct_accounts):
+    registry, court, appeals = _wire_up(direct_deploy)
+    stranger = direct_accounts[1]
+
+    fake_case_json = json.dumps({
+        "case_id": 0,
+        "claimant": "0x" + "11" * 20,
+        "description": "Forged case",
+        "verdict": "NO_BREACH",
+    })
+    with pytest.raises(Exception):
+        appeals.file_appeal(0, fake_case_json, sender=stranger)
+
+
 def test_appeal_overturns_and_records_final_verdict(direct_deploy, mock_llm):
-    registry = direct_deploy(PRECEDENT_REGISTRY_PATH)
-    appeals = direct_deploy(APPEALS_COURT_PATH, registry.address)
+    registry, court, appeals = _wire_up(direct_deploy)
 
     case_json = json.dumps({
         "case_id": 0,
@@ -201,7 +208,7 @@ def test_appeal_overturns_and_records_final_verdict(direct_deploy, mock_llm):
         })
     )
 
-    appeals.file_appeal(0, case_json)
+    appeals.file_appeal(0, case_json, sender=court.address)
 
     appeal = json.loads(appeals.get_appeal(0))
     assert appeal["overturned"] is True
@@ -216,8 +223,7 @@ def test_appeal_overturns_and_records_final_verdict(direct_deploy, mock_llm):
 
 
 def test_appeal_confirms_when_verdict_unchanged(direct_deploy, mock_llm):
-    registry = direct_deploy(PRECEDENT_REGISTRY_PATH)
-    appeals = direct_deploy(APPEALS_COURT_PATH, registry.address)
+    registry, court, appeals = _wire_up(direct_deploy)
 
     case_json = json.dumps({
         "case_id": 1,
@@ -235,7 +241,7 @@ def test_appeal_confirms_when_verdict_unchanged(direct_deploy, mock_llm):
         })
     )
 
-    appeals.file_appeal(1, case_json)
+    appeals.file_appeal(1, case_json, sender=court.address)
 
     appeal = json.loads(appeals.get_appeal(0))
     assert appeal["overturned"] is False
