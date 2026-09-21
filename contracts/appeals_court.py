@@ -36,16 +36,34 @@ VERDICT_NO_BREACH = "NO_BREACH"
 class AppealsCourt(gl.Contract):
     owner: Address
     precedent_registry: Address
+    first_instance_court: Address
+    first_instance_court_set: bool
     next_appeal_id: u256
     appeals: TreeMap[u256, str]
 
     def __init__(self, precedent_registry_address):
         self.owner = gl.message.sender_address
         self.precedent_registry = _normalize_address(precedent_registry_address)
+        self.first_instance_court = Address(int(0).to_bytes(20, "big"))
+        self.first_instance_court_set = False
         self.next_appeal_id = u256(0)
+
+    @gl.public.write
+    def set_first_instance_court(self, first_instance_court_address) -> None:
+        if gl.message.sender_address != self.owner:
+            raise gl.vm.UserError("only owner can set first instance court")
+        if self.first_instance_court_set:
+            raise gl.vm.UserError("first instance court already set")
+        self.first_instance_court = _normalize_address(first_instance_court_address)
+        self.first_instance_court_set = True
 
     @gl.public.write.payable
     def file_appeal(self, case_id: u256, case_json: str) -> None:
+        if not self.first_instance_court_set:
+            raise gl.vm.UserError("first instance court not configured yet")
+        if gl.message.sender_address != self.first_instance_court:
+            raise gl.vm.UserError("only the configured first instance court can file an appeal")
+
         bond = gl.message.value
         case_record = json.loads(case_json)
         description = case_record.get("description", "")

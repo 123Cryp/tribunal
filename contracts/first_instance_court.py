@@ -207,6 +207,8 @@ class FirstInstanceCourt(gl.Contract):
             raise gl.vm.UserError("case not found")
 
         record = json.loads(self.cases[case_id])
+        if str(gl.message.sender_address) != record.get("claimant"):
+            raise gl.vm.UserError("only the recorded claimant can appeal this case")
         if record.get("appealed"):
             raise gl.vm.UserError("case already appealed")
         record["appealed"] = True

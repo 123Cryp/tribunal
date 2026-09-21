@@ -12,6 +12,18 @@ STOPWORDS = {
 }
 
 
+def _normalize_address(value) -> Address:
+    if isinstance(value, Address):
+        return value
+    if isinstance(value, int):
+        return Address(value.to_bytes(20, "big"))
+    return Address(value)
+
+
+def _zero_address() -> Address:
+    return Address(int(0).to_bytes(20, "big"))
+
+
 def _significant_words(text):
     words = text.lower().replace(",", " ").replace(".", " ").split()
     result = set()
@@ -22,14 +34,48 @@ def _significant_words(text):
 
 
 class PrecedentRegistry(gl.Contract):
+    owner: Address
+    first_instance_court: Address
+    first_instance_court_set: bool
+    appeals_court: Address
+    appeals_court_set: bool
     next_entry_id: u256
     entries: TreeMap[u256, str]
 
     def __init__(self):
+        self.owner = gl.message.sender_address
+        self.first_instance_court = _zero_address()
+        self.first_instance_court_set = False
+        self.appeals_court = _zero_address()
+        self.appeals_court_set = False
         self.next_entry_id = u256(0)
 
     @gl.public.write
+    def set_first_instance_court(self, first_instance_court_address) -> None:
+        if gl.message.sender_address != self.owner:
+            raise gl.vm.UserError("only owner can set first instance court")
+        if self.first_instance_court_set:
+            raise gl.vm.UserError("first instance court already set")
+        self.first_instance_court = _normalize_address(first_instance_court_address)
+        self.first_instance_court_set = True
+
+    @gl.public.write
+    def set_appeals_court(self, appeals_court_address) -> None:
+        if gl.message.sender_address != self.owner:
+            raise gl.vm.UserError("only owner can set appeals court")
+        if self.appeals_court_set:
+            raise gl.vm.UserError("appeals court already set")
+        self.appeals_court = _normalize_address(appeals_court_address)
+        self.appeals_court_set = True
+
+    @gl.public.write
     def record_verdict(self, case_id: u256, description: str, verdict: str, tier: str) -> None:
+        sender = gl.message.sender_address
+        is_first_instance = self.first_instance_court_set and sender == self.first_instance_court
+        is_appeals = self.appeals_court_set and sender == self.appeals_court
+        if not is_first_instance and not is_appeals:
+            raise gl.vm.UserError("only the configured court contracts can record a verdict")
+
         entry = {
             "case_id": int(case_id),
             "description": description,
